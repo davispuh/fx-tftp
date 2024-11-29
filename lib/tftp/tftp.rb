@@ -20,14 +20,14 @@ module TFTP
     end
 
     # Read Request
-    RRQ = Base.new(:filename, :mode)
+    RRQ = Base.new(:filename, :mode, :options)
     class RRQ
       # Convert to binary string.
       def to_str; "\x00\x01" + self.filename + "\x00" + self.mode.to_s + "\x00"; end
     end
 
     # Write Request
-    WRQ = Base.new(:filename, :mode)
+    WRQ = Base.new(:filename, :mode, :options)
     class WRQ
       def to_str; "\x00\x02" + self.filename + "\x00" + self.mode.to_s + "\x00"; end
     end
@@ -52,6 +52,11 @@ module TFTP
       def to_str; "\x00\x05" + [self.code].pack('n') + self.msg + "\x00"; end
     end
 
+    OACK = Base.new(:options)
+    class OACK
+      def to_str; "\x00\x06" + self.options.to_a.flatten.map { |opt| opt.to_s + "\x00" }.join(); end
+    end
+
     # Parse a binary string into a packet.
     # Does some sanity checking, can raise a ParseError.
     def self.parse(data)
@@ -71,8 +76,13 @@ module TFTP
         filename = xs[0]
         mode = xs[1].downcase.to_sym
         raise ParseError, "Unknown mode '#{xs[1].inspect}'" unless [:netascii, :octet].member? mode
-        return RRQ.new(filename, mode) if opcode == 1
-        return WRQ.new(filename, mode)
+        options = {}
+        if xs.length > 2
+          xs << '' unless (xs.length % 2).zero?
+          options = Hash[*xs[2..]]
+        end
+        return RRQ.new(filename, mode, options) if opcode == 1
+        return WRQ.new(filename, mode, options)
       when 3 # data
         seq = payload.unpack('n').first
         block = payload.slice(2, payload.length - 2) || ''
@@ -149,6 +159,15 @@ module TFTP
           return
         end
         log :info, "#{tag} Sent file"
+      end
+
+      def sendOACK(tag, sock, options)
+          sock.send(Packet::OACK.new(options).encode, 0)
+          msg, _ = sock.recvfrom(4, 0)
+          pkt = Packet.parse(msg)
+          if pkt.class != Packet::ACK
+            log :warn, "#{tag} Expected ACK but got: #{pkt.class}"
+          end
       end
 
       # Receive data over an established connection.
@@ -246,6 +265,9 @@ module TFTP
           mode = 'r'
           mode += 'b' if req.mode == :octet
           io = File.open(path, mode)
+          if req.options.key?('tsize')
+            sendOACK(tag, sock, { 'tsize' => io.stat.size })
+          end
           send(tag, sock, io)
           sock.close
           io.close
