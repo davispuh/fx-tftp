@@ -129,15 +129,18 @@ module TFTP
               log :warn, "#{tag} Timeout at block ##{seq}"
               return
             end
-            msg, _ = sock.recvfrom(4, 0)
-            pkt = Packet.parse(msg)
-            if pkt.class != Packet::ACK
-              log :warn, "#{tag} Expected ACK but got: #{pkt.class}"
-              return
-            end
-            if pkt.seq != seq
-              log :warn, "#{tag} Seq mismatch: #{seq} != #{pkt.seq}"
-              return
+            loop do
+              msg, _ = sock.recvfrom(4, 0)
+              pkt = Packet.parse(msg)
+              if pkt.class != Packet::ACK
+                log :warn, "#{tag} Expected ACK but got: #{pkt.class}"
+                return
+              end
+              break if pkt.seq == seq
+              if pkt.seq > seq
+                log :warn, "#{tag} Seq mismatch: #{seq} != #{pkt.seq}"
+                return
+              end
             end
             # Increment with wrap around at 16 bit boundary,
             # because of tftp block number field size limit.
