@@ -45,7 +45,7 @@ module TFTP
     class DATA
       def to_str; "\x00\x03" + [self.seq].pack('n') + self.data; end
       # Check if this is the last data packet for this session.
-      def last?; self.data.length < 512; end
+      def last?(blksize = 512); self.data.length < blksize; end
     end
 
     # Acknowledgement
@@ -67,7 +67,7 @@ module TFTP
 
     # Parse a binary string into a packet.
     # Does some sanity checking, can raise a ParseError.
-    def self.parse(data)
+    def self.parse(data, blksize = 512)
       data = data.force_encoding('ascii-8bit')
 
       opcode = data.unpack('n').first
@@ -94,7 +94,7 @@ module TFTP
       when 3 # data
         seq = payload.unpack('n').first
         block = payload.slice(2, payload.length - 2) || ''
-        raise ParseError, "Exceeded block length with #{block.length} bytes" if block.length > 512
+        raise ParseError, "Exceeded block length with #{block.length} bytes" if block.length > blksize
         return DATA.new(seq, block)
       when 4 # ack
         raise ParseError, "Wrong payload length with #{payload.length} bytes" if payload.length != 2
@@ -114,6 +114,9 @@ module TFTP
   module Handler
     # Base handler contains the common methods for real handlers.
     class Base
+
+      attr_reader :blksize
+
       # Initialize the handler.
       #
       # Options:
@@ -128,6 +131,7 @@ module TFTP
         @logger = opts[:logger]
         @timeout = opts[:timeout] || 5
         @opts = opts
+        @blksize = 512
       end
 
       # Send data over an established connection.
@@ -141,14 +145,14 @@ module TFTP
         seq = 1
         begin
           while not io.eof?
-            block = io.read(512)
+            block = io.read(@blksize)
             sock.send(Packet::DATA.new(seq, block).encode, 0)
             unless IO.select([sock], nil, nil, @timeout)
               log :warn, "#{tag} Timeout at block ##{seq}"
               return
             end
             msg, _ = sock.recvfrom(4, 0)
-            pkt = Packet.parse(msg)
+            pkt = Packet.parse(msg, @blksize)
             if pkt.class != Packet::ACK
               log :warn, "#{tag} Expected ACK but got: #{pkt.class}"
               return
@@ -161,7 +165,7 @@ module TFTP
             # because of tftp block number field size limit.
             seq = (seq + 1) & 0xFFFF
           end
-          sock.send(Packet::DATA.new(seq, '').encode, 0) if io.size % 512 == 0
+          sock.send(Packet::DATA.new(seq, '').encode, 0) if io.size % @blksize == 0
         rescue ParseError => e
           log :warn, "#{tag} Packet parse error: #{e.to_s}"
           return
@@ -176,7 +180,7 @@ module TFTP
             return
           end
           msg, _ = sock.recvfrom(516, 0)
-          pkt = Packet.parse(msg)
+          pkt = Packet.parse(msg, @blksize)
           if pkt.class != Packet::ACK
             error_message = pkt.is_a?(Packet::ERROR) ? "ERROR #{pkt.code} - #{pkt.msg}" : pkt.class.to_s
             log :warn, "#{tag} Expected ACK but got: #{error_message}"
@@ -202,7 +206,7 @@ module TFTP
               return false
             end
             msg, _ = sock.recvfrom(516, 0)
-            pkt = Packet.parse(msg)
+            pkt = Packet.parse(msg, @blksize)
             if pkt.class != Packet::DATA
               log :warn, "#{tag} Expected DATA but got: #{pkt.class}"
               return false
@@ -213,7 +217,7 @@ module TFTP
             end
             io.write(pkt.data)
             sock.send(Packet::ACK.new(seq).encode, 0)
-            break if pkt.last?
+            break if pkt.last?(@blksize)
             seq = (seq + 1) & 0xFFFF
           end
         rescue ParseError => e
@@ -278,8 +282,18 @@ module TFTP
           mode = 'r'
           mode += 'b' if req.mode == :octet
           io = File.open(path, mode)
+          options = {}
           if req.options.key?('tsize')
-            send_oack(tag, sock, { 'tsize' => io.stat.size })
+            options['tsize'] = io.stat.size
+          end
+          if req.options.key?('blksize')
+            @blksize = req.options['blksize'].to_i
+            options['blksize'] = @blksize
+          else
+            @blksize = 512
+          end
+          if !options.empty?
+            send_oack(tag, sock, options)
           end
           send(tag, sock, io)
           sock.close
@@ -356,7 +370,7 @@ module TFTP
           log :info, "#{tag} New initial packet received"
 
           begin
-            pkt = Packet.parse(msg)
+            pkt = Packet.parse(msg, @handler.blksize)
           rescue ParseError => e
             log :warn, "#{tag} Packet parse error: #{e.to_s}"
             next
