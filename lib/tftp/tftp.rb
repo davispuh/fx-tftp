@@ -128,6 +128,7 @@ module TFTP
         @logger = opts[:logger]
         @timeout = opts[:timeout] || 5
         @opts = opts
+        @windowsize = 1
       end
 
       # Send data over an established connection.
@@ -139,12 +140,21 @@ module TFTP
       # @param io   [IO]        Object to send data from
       def send(tag, sock, io)
         seq = 1
+        windowsize = @windowsize
         begin
           while not io.eof?
-            block = io.read(512)
-            sock.send(Packet::DATA.new(seq, block).encode, 0)
+            window = 1
+            while !io.eof? && window <= windowsize
+              block = io.read(512)
+              sock.send(Packet::DATA.new(seq, block).encode, 0)
+              expectedseq = seq
+              # Increment with wrap around at 16 bit boundary,
+              # because of tftp block number field size limit.
+              seq = (seq + 1) & 0xFFFF
+              window += 1
+            end
             unless IO.select([sock], nil, nil, @timeout)
-              log :warn, "#{tag} Timeout at block ##{seq}"
+              log :warn, "#{tag} Timeout at block ##{expectedseq}"
               return
             end
             msg, _ = sock.recvfrom(4, 0)
@@ -153,13 +163,10 @@ module TFTP
               log :warn, "#{tag} Expected ACK but got: #{pkt.class}"
               return
             end
-            if pkt.seq != seq
-              log :warn, "#{tag} Seq mismatch: #{seq} != #{pkt.seq}"
+            if pkt.seq != expectedseq
+              log :warn, "#{tag} Seq mismatch: #{expectedseq} != #{pkt.seq}"
               return
             end
-            # Increment with wrap around at 16 bit boundary,
-            # because of tftp block number field size limit.
-            seq = (seq + 1) & 0xFFFF
           end
           sock.send(Packet::DATA.new(seq, '').encode, 0) if io.size % 512 == 0
         rescue ParseError => e
@@ -278,8 +285,18 @@ module TFTP
           mode = 'r'
           mode += 'b' if req.mode == :octet
           io = File.open(path, mode)
+          options = {}
           if req.options.key?('tsize')
-            send_oack(tag, sock, { 'tsize' => io.stat.size })
+            options['tsize'] = io.stat.size
+          end
+          if req.options.key?('windowsize')
+            @windowsize = req.options['windowsize'].to_i
+            options['windowsize'] = @windowsize
+          else
+            @windowsize = 1
+          end
+          if !options.empty?
+            send_oack(tag, sock, options)
           end
           send(tag, sock, io)
           sock.close
