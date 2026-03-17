@@ -129,10 +129,11 @@ module TFTP
               log :warn, "#{tag} Timeout at block ##{seq}"
               return
             end
-            msg, _ = sock.recvfrom(4, 0)
+            msg, _ = sock.recvfrom(516, 0)
             pkt = Packet.parse(msg)
             if pkt.class != Packet::ACK
-              log :warn, "#{tag} Expected ACK but got: #{pkt.class}"
+              error_message = pkt.is_a?(Packet::ERROR) ? "ERROR #{pkt.code} - #{pkt.msg}" : pkt.class.to_s
+              log :warn, "#{tag} Expected ACK but got: #{error_message}"
               return
             end
             if pkt.seq != seq
@@ -172,7 +173,8 @@ module TFTP
             msg, _ = sock.recvfrom(516, 0)
             pkt = Packet.parse(msg)
             if pkt.class != Packet::DATA
-              log :warn, "#{tag} Expected DATA but got: #{pkt.class}"
+              error_message = pkt.is_a?(Packet::ERROR) ? "ERROR #{pkt.code} - #{pkt.msg}" : pkt.class.to_s
+              log :warn, "#{tag} Expected DATA but got: #{error_message}"
               return false
             end
             if pkt.seq != seq
